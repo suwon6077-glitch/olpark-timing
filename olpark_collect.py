@@ -19,7 +19,9 @@ import os
 import sys
 import time
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+
+KST = timezone(timedelta(hours=9))
 
 import requests
 
@@ -177,6 +179,22 @@ def collect_odcloud(key, per_page=1000, out="inout2024_raw.csv", sleep=0.2):
 
 
 # ---------- 2) 실시간 주차대수 주기 수집 ----------
+def extract_parking_sum(raw):
+    """응답 예: [{"parking_sum":1848}] / {"parking_sum":1848} / XML"""
+    try:
+        js = json.loads(raw)
+        if isinstance(js, list):
+            js = js[0] if js else {}
+        return js.get("parking_sum", "")
+    except Exception:
+        pass
+    try:
+        node = ET.fromstring(raw).find(".//parking_sum")
+        return node.text if node is not None else ""
+    except Exception:
+        return ""
+
+
 def collect_realtime(interval=300, out="realtime_parking.csv", once=False):
     new_file = not os.path.exists(out)
     if os.path.dirname(out):
@@ -184,19 +202,11 @@ def collect_realtime(interval=300, out="realtime_parking.csv", once=False):
     if not once:
         print(f"{interval}초 간격 수집 시작 → {out}  (Ctrl+C로 종료)")
     while True:
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ts = datetime.now(KST).isoformat(timespec="seconds")  # 예: 2026-11-22T20:03:06+09:00
         try:
             r = requests.get(REALTIME_URL, params={"apiKey": REALTIME_KEY}, timeout=30)
             raw = r.text.strip().replace("\n", " ")
-            value = ""
-            try:
-                value = json.loads(raw).get("parking_sum", "")
-            except Exception:
-                try:
-                    node = ET.fromstring(raw).find(".//parking_sum")
-                    value = node.text if node is not None else ""
-                except Exception:
-                    pass
+            value = extract_parking_sum(raw)
             row = [ts, value, raw[:300]]
         except requests.RequestException as e:
             row = [ts, "", f"ERROR {e}"]
