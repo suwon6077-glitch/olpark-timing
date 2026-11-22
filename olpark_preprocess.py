@@ -43,7 +43,7 @@ def preprocess(src, dst):
     df["입차일"] = df["입차시각"].dt.date
     df["입차시"] = df["입차시각"].dt.hour
     df["출차시"] = df["출차시각"].dt.hour
-    df["요일"] = df["입차시각"].dt.dayofweek  # 0=월
+    df["요일"] = df["입차시각"].dt.day_of_week  # 0=월
 
     df = df.drop_duplicates("ID").sort_values("입차시각")
     df.to_csv(dst, index=False, encoding="utf-8-sig")
@@ -55,6 +55,9 @@ def preprocess(src, dst):
     print(f"음수 주차시간: {(df['주차시간_분'] < 0).sum():,}행")
     print("\n입구문 분포\n", df["입구문"].value_counts(dropna=False).head(10))
     print("\n출구문 분포\n", df["출구문"].value_counts(dropna=False).head(10))
+    bad = df.loc[df["출구문"].isna() & ~df["출차누락"], "출구"].value_counts().head(10)
+    if len(bad):
+        print("\n문 이름 형식이 다른 출구 값\n", bad)
     print("\n입차 기간:", df["입차시각"].min(), "~", df["입차시각"].max())
 
 

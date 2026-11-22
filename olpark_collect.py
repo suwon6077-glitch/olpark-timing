@@ -56,50 +56,80 @@ def parse_items(text):
 
 
 # ---------- 1) 입출차 API 전체 수집 ----------
-def collect_kcisa(url, key, rows=1000, out="inout_raw.csv", sleep=0.3):
-    page, written, total, fields = 1, 0, None, None
-    f = open(out, "w", newline="", encoding="utf-8-sig")
-    writer = None
+KCISA_FIELDS = ["TITLE", "URL", "LOCAL_ID", "ISSUED_DATE", "DESCRIPTION",
+                "SUB_DESCRIPTION", "COLLECTED_DATE", "REG_DT"]
+BACKOFF = [15, 30, 60, 120, 300, 600]  # 429(요청 과다) 등 실패 시 대기 초
+
+
+def collect_kcisa(url, key, rows=1000, out="inout_raw.csv", sleep=2.0,
+                  start=1, max_minutes=None):
+    """페이지를 반복 호출해 CSV로 저장.
+    - start>1 이면 기존 파일 뒤에 이어 붙임
+    - 429 등 실패 시 BACKOFF 간격으로 기다렸다 재시도
+    - max_minutes 가 지나면 멈추고 다음 시작 페이지를 next_page.txt 에 기록
+    종료코드: 0 = 전부 받음 또는 시간 제한으로 정상 중단, 1 = 재시도 모두 실패
+    """
+    t0 = time.time()
+    page, written, total = start, 0, None
+    new_file = start == 1 or not os.path.exists(out)
+    f = open(out, "w" if new_file else "a", newline="", encoding="utf-8-sig")
+    writer = csv.DictWriter(f, fieldnames=KCISA_FIELDS, extrasaction="ignore")
+    if new_file:
+        writer.writeheader()
+    status = 0
     try:
         while True:
+            if max_minutes and (time.time() - t0) / 60 > max_minutes:
+                print(f"시간 제한 {max_minutes}분 도달 → page {page} 부터 다음 실행에서 이어받기")
+                break
             params = {"serviceKey": key, "numOfRows": rows, "pageNo": page}
-            for attempt in range(3):
+            r = None
+            for attempt, wait in enumerate([0] + BACKOFF):
+                if wait:
+                    print(f"  page {page}: {wait}초 대기 후 재시도 ({attempt}/{len(BACKOFF)})")
+                    time.sleep(wait)
                 try:
-                    r = requests.get(url, params=params, timeout=60)
-                    r.raise_for_status()
-                    break
+                    r = requests.get(url, params=params, timeout=120)
+                    if r.status_code == 200 and "<resultCode>0000" in r.text[:300]:
+                        break
+                    print(f"  page {page}: HTTP {r.status_code} {r.text[:150]!r}")
                 except requests.RequestException as e:
-                    print(f"  page {page} 재시도 {attempt + 1}/3: {e}")
-                    time.sleep(3)
-            else:
-                print(f"page {page} 실패 → 중단. 다음에 --start {page} 로 이어받기")
+                    print(f"  page {page}: {e}")
+                r = None
+            if r is None:
+                print(f"page {page} 실패 → 중단")
+                status = 1
                 break
 
-            if page == 1:
-                print("첫 응답 앞부분:\n", r.text[:500], "\n")
-
+            if page == start:
+                print("첫 응답 앞부분:\n", r.text[:300], "\n")
             items, tc = parse_items(r.text)
             if total is None:
                 total = tc
-                print(f"totalCount = {total}")
+                print(f"totalCount = {total}, 예상 마지막 페이지 = {-(-total // rows)}")
             if not items:
+                print("빈 페이지 → 끝")
+                page = None
                 break
-
-            if writer is None:
-                fields = list(items[0].keys())
-                writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
-                writer.writeheader()
             writer.writerows(items)
+            f.flush()
             written += len(items)
-            print(f"page {page}: 누적 {written}/{total}")
-
-            if total and written >= total:
+            done = (page - 1) * rows + len(items)
+            el = (time.time() - t0) / 60
+            print(f"page {page}: 이번 실행 {written}행, 전체 진행 {done}/{total} ({el:.1f}분)")
+            if total and done >= total:
+                page = None
                 break
             page += 1
             time.sleep(sleep)
     finally:
         f.close()
-    print(f"완료: {out} ({written}행)")
+        with open("next_page.txt", "w") as pf:
+            pf.write("DONE" if page is None else str(page))
+    print(f"이번 실행 저장: {out} (+{written}행), 다음 시작 페이지: "
+          f"{'없음(완료)' if page is None else page}")
+    if status:
+        sys.exit(1)
 
 
 # ---------- 1-2) 공공데이터포털(odcloud) 입출차 2024 ----------
@@ -191,6 +221,9 @@ if __name__ == "__main__":
         a.add_argument("--key", required=True)
         a.add_argument("--rows", type=int, default=1000)
         a.add_argument("--out", default=default_out)
+        a.add_argument("--start", type=int, default=1, help="시작 페이지 (이어받기)")
+        a.add_argument("--sleep", type=float, default=2.0, help="호출 간격(초)")
+        a.add_argument("--max-minutes", type=float, default=None)
     c = sub.add_parser("inout2024")
     c.add_argument("--key", required=True)
     c.add_argument("--rows", type=int, default=1000)
@@ -202,7 +235,8 @@ if __name__ == "__main__":
     args = ap.parse_args()
 
     if args.cmd in KCISA_URLS:
-        collect_kcisa(KCISA_URLS[args.cmd], args.key, args.rows, args.out)
+        collect_kcisa(KCISA_URLS[args.cmd], args.key, args.rows, args.out,
+                      args.sleep, args.start, args.max_minutes)
     elif args.cmd == "inout2024":
         collect_odcloud(args.key, args.rows, args.out)
     else:
