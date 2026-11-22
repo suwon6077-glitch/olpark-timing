@@ -2,11 +2,25 @@ name: 입출차 전체 수집
 
 on:
   workflow_dispatch:
+    inputs:
+      start_page:
+        description: "시작 페이지 (처음은 1, 이어받을 땐 지난 실행의 next_page 값)"
+        default: "1"
+      rows:
+        description: "한 번에 받을 건수 (numOfRows)"
+        default: "1000"
+      sleep:
+        description: "호출 간격(초)"
+        default: "2"
+      with_2024:
+        description: "2024 입출차(공공데이터포털)도 같이 받기"
+        type: boolean
+        default: false
 
 jobs:
   inout:
     runs-on: ubuntu-latest
-    timeout-minutes: 340
+    timeout-minutes: 350
     env:
       KCISA_KEY: ${{ secrets.KCISA_KEY }}
       ODCLOUD_KEY: ${{ secrets.ODCLOUD_KEY }}
@@ -17,32 +31,36 @@ jobs:
           python-version: "3.12"
       - run: pip install requests pandas
 
-      - name: 연결 테스트 (해외 서버에서 API가 열리는지 확인)
-        run: |
-          curl -sS -m 60 "https://api.kcisa.kr/openapi/API_CPM_008/request?serviceKey=${KCISA_KEY}&numOfRows=1&pageNo=1" | head -c 800
-
       - name: 공공데이터포털 입출차(2024) 수집
-        if: env.ODCLOUD_KEY != ''
+        if: inputs.with_2024
         continue-on-error: true
         run: python olpark_collect.py inout2024 --key "$ODCLOUD_KEY"
 
-      - name: 입출차 전체 수집 (KCISA)
-        run: python olpark_collect.py inout --key "$KCISA_KEY"
+      - name: 입출차 수집 (KCISA)
+        run: >
+          python olpark_collect.py inout --key "$KCISA_KEY"
+          --start ${{ inputs.start_page }} --rows ${{ inputs.rows }}
+          --sleep ${{ inputs.sleep }} --max-minutes 320
+          --out inout_raw_p${{ inputs.start_page }}.csv
 
-      - name: 전처리
+      - name: 다음 시작 페이지
         if: always()
-        run: python olpark_preprocess.py inout_raw.csv inout_clean.csv
+        run: echo "next_page = $(cat next_page.txt 2>/dev/null)" | tee -a $GITHUB_STEP_SUMMARY
+
+      - name: 전처리 (이번 실행분 점검용)
+        if: always()
+        continue-on-error: true
+        run: python olpark_preprocess.py inout_raw_p${{ inputs.start_page }}.csv inout_clean_p${{ inputs.start_page }}.csv
 
       - name: 압축
         if: always()
-        run: gzip -kf inout_raw.csv inout_clean.csv inout2024_raw.csv || true
+        run: gzip -kf *.csv || true
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: inout-data
+          name: inout-data-p${{ inputs.start_page }}
           path: |
-            inout_raw.csv.gz
-            inout_clean.csv.gz
-            inout2024_raw.csv.gz
+            *.csv.gz
+            next_page.txt
           retention-days: 30
