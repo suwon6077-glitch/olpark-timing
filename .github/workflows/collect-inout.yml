@@ -1,0 +1,48 @@
+name: 입출차 전체 수집
+
+on:
+  workflow_dispatch:
+
+jobs:
+  inout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    env:
+      KCISA_KEY: ${{ secrets.KCISA_KEY }}
+      ODCLOUD_KEY: ${{ secrets.ODCLOUD_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests pandas
+
+      - name: 연결 테스트 (해외 서버에서 API가 열리는지 확인)
+        run: |
+          curl -sS -m 60 "https://api.kcisa.kr/openapi/API_CPM_008/request?serviceKey=${KCISA_KEY}&numOfRows=1&pageNo=1" | head -c 800
+
+      - name: 공공데이터포털 입출차(2024) 수집
+        if: env.ODCLOUD_KEY != ''
+        continue-on-error: true
+        run: python olpark_collect.py inout2024 --key "$ODCLOUD_KEY"
+
+      - name: 입출차 전체 수집 (KCISA)
+        run: python olpark_collect.py inout --key "$KCISA_KEY"
+
+      - name: 전처리
+        if: always()
+        run: python olpark_preprocess.py inout_raw.csv inout_clean.csv
+
+      - name: 압축
+        if: always()
+        run: gzip -kf inout_raw.csv inout_clean.csv inout2024_raw.csv || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: inout-data
+          path: |
+            inout_raw.csv.gz
+            inout_clean.csv.gz
+            inout2024_raw.csv.gz
+          retention-days: 30
