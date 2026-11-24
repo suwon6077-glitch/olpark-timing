@@ -1,0 +1,33 @@
+name: 연계 데이터 수집
+
+on:
+  workflow_dispatch:
+
+jobs:
+  linked:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      LINKED_KEY: ${{ secrets.LINKED_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests
+
+      - name: 연결 테스트
+        run: |
+          curl -sS -m 60 "https://api.kcisa.kr/openapi/API_CPM_009/request?serviceKey=${LINKED_KEY}&numOfRows=2&pageNo=1" | head -c 1500
+
+      - name: 연계 데이터 수집
+        run: python olpark_collect.py linked --key "$LINKED_KEY" --rows 1000 --sleep 2
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linked-data
+          path: |
+            linked_raw.csv
+            next_page.txt
+          retention-days: 30
