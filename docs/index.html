@@ -390,15 +390,22 @@ function renderSched(){
   const list=items.filter(x=>(!m||x.date.startsWith(m))&&(!q||x.title.toLowerCase().includes(q)));
   const future=list.filter(x=>x.date>=today).sort((a,b)=>a.date<b.date?-1:1), past=list.filter(x=>x.date<today).sort((a,b)=>a.date<b.date?1:-1);
   const byDay=arr=>{ const g=[]; for(const x of arr){ if(!g.length||g[g.length-1].date!==x.date) g.push({date:x.date,dow:x.dow,peak:x.peakCars,ph:x.peakHour,xs:[]}); g[g.length-1].xs.push(x); } return g; };
-  const html=arr=>byDay(arr).map(d=>`<div class="sch-day">${esc(d.date.slice(5).replace('-','/'))} (${esc(d.dow)})${d.peak?`<span>그날 최대 주차 ${d.peak.toLocaleString()}대 · ${d.ph}시</span>`:''}</div>`+
-    d.xs.map(x=>`<button class="sch-item" data-i="${items.indexOf(x)}"><b>${esc(x.title)}</b><small>${x.from}~${x.to}시 · 관람객 약 ${Number(x.audience).toLocaleString()}명</small></button>`).join('')).join('');
+  // 같은 날 여러 공연이 같은 관람객 수를 갖고 있으면 그 숫자는 합계라서, 공연마다가 아니라 날짜 줄에 한 번만 보여준다
+  const html=arr=>byDay(arr).map(d=>{
+    const shared=d.xs.length>1 && d.xs.every(x=>x.audience===d.xs[0].audience);
+    const head=`<div class="sch-day">${esc(d.date.slice(5).replace('-','/'))} (${esc(d.dow)})${d.peak?`<span>최대 주차 ${d.peak.toLocaleString()}대 · ${d.ph}시</span>`:''}</div>`
+      +(shared?`<p class="note" style="margin:0 0 6px">공연 ${d.xs.length}건 · 관람객 합계 약 ${Number(d.xs[0].audience).toLocaleString()}명</p>`:'');
+    return head+d.xs.map(x=>`<button class="sch-item" data-i="${items.indexOf(x)}"><b>${esc(x.title)}</b><small>${x.from}~${x.to}시${shared?'':` · 관람객 약 ${Number(x.audience).toLocaleString()}명`}</small></button>`).join('');
+  }).join('');
   $('schList').innerHTML=(future.length?'<div class="sch-day">다가오는 공연</div>'+html(future):'')+(past.length?(future.length?'<div class="sch-day">지난 공연</div>':'')+html(past):'<p class="note">조건에 맞는 공연이 없습니다.</p>');
   for(const b of $('schList').querySelectorAll('.sch-item')) b.onclick=()=>pickEvent(items[+b.dataset.i]);
 }
 function pickEvent(x){
   $('scn').value='공연 종료 직후'; waits=JSON.parse(JSON.stringify(SCN['공연 종료 직후'])); renderWaits();
   $('eventNote').hidden=false;
-  $('eventNote').textContent=`${x.date.slice(5).replace('-','/')}(${x.dow}) ${x.title} · ${x.to>=24?'자정':x.to+'시'} 공연 종료 직후 기준입니다. 관람객 약 ${Number(x.audience).toLocaleString()}명, 그날 최대 주차 ${x.peakCars?x.peakCars.toLocaleString()+'대':'정보 없음'}.`;
+  const same=(SCHED.items||[]).filter(y=>y.date===x.date);
+  const audTxt=same.length>1&&same.every(y=>y.audience===x.audience)?`그날 공연 ${same.length}건 관람객 합계 약 ${Number(x.audience).toLocaleString()}명`:`관람객 약 ${Number(x.audience).toLocaleString()}명`;
+  $('eventNote').textContent=`${x.date.slice(5).replace('-','/')}(${x.dow}) ${x.title} · ${x.to>=24?'자정':x.to+'시'} 공연 종료 직후 기준입니다. ${audTxt}, 그날 최대 주차 ${x.peakCars?x.peakCars.toLocaleString()+'대':'정보 없음'}.`;
   setTab('route'); if(lot) solve(); else toast('주차한 주차장을 골라 주세요');
 }
 $('schMonth').onchange=renderSched; $('schQ').oninput=renderSched;
