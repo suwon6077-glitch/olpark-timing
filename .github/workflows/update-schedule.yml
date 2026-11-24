@@ -1,0 +1,38 @@
+name: 공연 일정 갱신
+
+# 매일 새벽 3시(한국시간)에 연계 데이터를 다시 받아 docs/schedule.json을 갱신한다.
+on:
+  schedule:
+    - cron: "0 18 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: schedule
+  cancel-in-progress: false
+
+jobs:
+  schedule:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      LINKED_KEY: ${{ secrets.LINKED_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests
+      - name: 연계 데이터 받기
+        run: python olpark_collect.py linked --key "$LINKED_KEY" --rows 1000 --sleep 2
+      - name: 일정 JSON 만들기
+        run: python build_schedule.py linked_raw.csv docs/schedule.json
+      - name: 바뀌었으면 커밋
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add docs/schedule.json
+          git commit -m "공연 일정 갱신 $(TZ=Asia/Seoul date +'%F')" || exit 0
+          for i in 1 2 3; do git pull --rebase && git push && break; sleep 5; done
