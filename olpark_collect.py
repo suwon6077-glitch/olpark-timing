@@ -58,8 +58,6 @@ def parse_items(text):
 
 
 # ---------- 1) 입출차 API 전체 수집 ----------
-KCISA_FIELDS = ["TITLE", "URL", "LOCAL_ID", "ISSUED_DATE", "DESCRIPTION",
-                "SUB_DESCRIPTION", "COLLECTED_DATE", "REG_DT"]
 BACKOFF = [15, 30, 60, 120, 300, 600]  # 429(요청 과다) 등 실패 시 대기 초
 
 
@@ -74,10 +72,12 @@ def collect_kcisa(url, key, rows=1000, out="inout_raw.csv", sleep=2.0,
     t0 = time.time()
     page, written, total = start, 0, None
     new_file = start == 1 or not os.path.exists(out)
+    fields = None
+    if not new_file:  # 이어받기: 기존 파일의 헤더를 그대로 사용
+        with open(out, encoding="utf-8-sig") as rf:
+            fields = next(csv.reader(rf))
     f = open(out, "w" if new_file else "a", newline="", encoding="utf-8-sig")
-    writer = csv.DictWriter(f, fieldnames=KCISA_FIELDS, extrasaction="ignore")
-    if new_file:
-        writer.writeheader()
+    writer = None
     status = 0
     try:
         while True:
@@ -113,6 +113,14 @@ def collect_kcisa(url, key, rows=1000, out="inout_raw.csv", sleep=2.0,
                 print("빈 페이지 → 끝")
                 page = None
                 break
+            if writer is None:
+                if fields is None:  # 새 파일: 첫 페이지의 필드명 사용 (API마다 컬럼이 다름)
+                    fields = list(items[0].keys())
+                    for it in items[1:]:
+                        fields += [k for k in it if k not in fields]
+                writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+                if new_file:
+                    writer.writeheader()
             writer.writerows(items)
             f.flush()
             written += len(items)
