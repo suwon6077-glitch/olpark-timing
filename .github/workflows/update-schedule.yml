@@ -34,7 +34,7 @@ jobs:
       - name: 일정 JSON 만들기
         run: python build_schedule.py linked_raw.csv docs/schedule.json
       - name: 올림픽공원 홈페이지 공연/행사 읽기
-        run: python olpark_events.py --debug debug --back 60
+        run: python olpark_events.py --debug debug
         continue-on-error: true
       - name: 확인용 HTML 보관
         if: always()
