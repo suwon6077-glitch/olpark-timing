@@ -399,7 +399,8 @@ function renderSched(){
   const up=items.filter(x=>x.date>=today).length;
   $('schHead').textContent=`${SCHED.range?SCHED.range.join(' ~ '):''} 공연 ${items.length}건 · ${up?`다가오는 공연 ${up}건`:'기관 데이터에 새 일정이 올라오면 매일 자동으로 추가됩니다'} · 갱신 ${String(SCHED.updated||'').replace('T',' ').slice(0,16)}`;
   const m=$('schMonth').value, q=$('schQ').value.trim().toLowerCase();
-  const list=items.filter(x=>(!m||x.date.startsWith(m))&&(!q||x.title.toLowerCase().includes(q)));
+  // 2주 넘게 이어지는 장기 공연(뮤지컬 등)은 검색할 때만 목록에 보인다. 그날 관람객 합계에는 들어 있다.
+  const list=items.filter(x=>(!m||x.date.startsWith(m))&&(q?x.title.toLowerCase().includes(q):!x.longRun));
   const future=list.filter(x=>x.date>=today).sort((a,b)=>a.date<b.date?-1:1), past=list.filter(x=>x.date<today).sort((a,b)=>a.date<b.date?1:-1);
   const byDay=arr=>{ const g=[]; for(const x of arr){ if(!g.length||g[g.length-1].date!==x.date) g.push({date:x.date,dow:x.dow,peak:x.peakCars,ph:x.peakHour,xs:[]}); g[g.length-1].xs.push(x); } return g; };
   // 같은 날 여러 공연이 같은 관람객 수를 갖고 있으면 그 숫자는 합계라서, 공연마다가 아니라 날짜 줄에 한 번만 보여준다
