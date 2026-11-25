@@ -1,10 +1,14 @@
 name: 공연 일정 갱신
 
-# 매일 새벽 3시(한국시간)에 연계 데이터를 다시 받아 docs/schedule.json을 갱신한다.
+# 매일 새벽 3시(한국시간)에 연계 데이터를 다시 받아 docs/schedule.json을 갱신하고,
+# 올림픽공원 홈페이지 공연/행사 안내, KOPIS, data/upcoming_manual.csv의 다가오는 공연을 덧붙인다. CSV를 고치면 바로 돈다.
 on:
   schedule:
     - cron: "0 18 * * *"
   workflow_dispatch:
+  push:
+    paths:
+      - data/upcoming_manual.csv
 
 permissions:
   contents: write
@@ -24,15 +28,31 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install requests
+      - run: pip install requests beautifulsoup4
       - name: 연계 데이터 받기
         run: python olpark_collect.py linked --key "$LINKED_KEY" --rows 1000 --sleep 2
       - name: 일정 JSON 만들기
         run: python build_schedule.py linked_raw.csv docs/schedule.json
+      - name: 올림픽공원 홈페이지 공연/행사 읽기
+        run: python olpark_events.py --debug debug --back 60
+        continue-on-error: true
+      - name: 확인용 HTML 보관
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ksponco-debug
+          path: debug/
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: 다가오는 공연 추가 (홈페이지 + KOPIS + 직접 입력)
+        env:
+          KOPIS_KEY: ${{ secrets.KOPIS_KEY }}
+        run: python build_upcoming.py docs/schedule.json
       - name: 바뀌었으면 커밋
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
           git add docs/schedule.json
+          git add data/ksponco_events.json 2>/dev/null || true
           git commit -m "공연 일정 갱신 $(TZ=Asia/Seoul date +'%F')" || exit 0
           for i in 1 2 3; do git pull --rebase && git push && break; sleep 5; done
