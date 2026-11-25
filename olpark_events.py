@@ -1,16 +1,14 @@
 """
 올림픽공원 공식 홈페이지 '공연/행사 안내' → data/ksponco_events.json
 
-목록: https://www.ksponco.or.kr/olympicpark/eventInfo/eventInfoList?mid=a20301010100
-상세: https://www.ksponco.or.kr/olympicpark/eventInfo/eventInfoView.es?mid=a20301010100&evtSeq=번호
+목록 화면은 달마다 아래 주소에서 JSON을 받아 그린다(페이지 스크립트에 적힌 방식 그대로).
+  POST https://www.ksponco.or.kr/olympicpark/eventInfo/eventInfoListAjax.es
+       {"nowYM": "202612", "plcCd": ""}  → [[이번 달 공연...], [지난 공연...]]
+  항목: evtSeq, title, plc(공연장), beginDt, endDt, tm(공연 시간 안내), fileNm(포스터)
+이번 달부터 앞으로 6개월을 받고, 실패하면 목록 HTML(이번 달)로 대신한다.
+상세 페이지(eventInfoView.es?evtSeq=번호)에서는 소요시간과 더 자세한 공연 시간을 읽는다(7일에 한 번).
 
-1) 목록 페이지에서 evtSeq·제목·장소·기간을 읽는다.
-2) evtSeq는 등록 순서대로 늘어나므로, 지금까지 본 가장 큰 번호 다음부터 상세 페이지를 차례로 열어
-   목록에 아직 안 뜬 다음 달 공연까지 찾는다(연속 15번 없으면 멈춤).
-3) 상세 페이지에서 회차 시각, 러닝타임, 포스터 주소를 읽는다.
-이미 본 공연은 data/ksponco_events.json 에 쌓아 두고, 상세는 7일에 한 번만 다시 읽는다.
-
-사용법: python olpark_events.py [--debug debug/]   (--debug: 받은 HTML을 저장해 구조 확인용으로 남김)
+사용법: python olpark_events.py [--months 6] [--debug debug/]
 """
 import argparse
 import json
@@ -23,249 +21,277 @@ import requests
 from bs4 import BeautifulSoup
 
 KST = timezone(timedelta(hours=9))
-BASE = "https://www.ksponco.or.kr/olympicpark/eventInfo/"
-LIST = BASE + "eventInfoList?mid=a20301010100"
-VIEW = BASE + "eventInfoView.es?mid=a20301010100&evtSeq={}"
 SITE = "https://www.ksponco.or.kr"
+CTX = SITE + "/olympicpark"
+LIST = CTX + "/eventInfo/eventInfoList?mid=a20301010100"
+AJAX = CTX + "/eventInfo/eventInfoListAjax.es"
+VIEW = CTX + "/eventInfo/eventInfoView.es?mid=a20301010100&evtSeq={}"
 STATE = "data/ksponco_events.json"
-UA = {"User-Agent": "Mozilla/5.0 (olpark-timing; public-data contest; github.com/suwon6077-glitch/olpark-timing)"}
-VENUES = ["KSPO DOME", "올림픽홀", "티켓링크 라이브 아레나", "핸드볼경기장", "우리금융아트홀", "88잔디마당",
-          "잔디마당", "평화의광장", "올림픽공원 수영장", "SK올림픽핸드볼경기장", "벨로드롬", "테니스경기장"]
-PERIOD = re.compile(r"(\d{4}[-.]\d{2}[-.]\d{2})\s*~\s*(\d{4}[-.]\d{2}[-.]\d{2})")
 DOW = "월화수목금토일"
-session = requests.Session()
-session.headers.update(UA)
+s = requests.Session()
+s.headers.update({"User-Agent": "Mozilla/5.0 (olpark-timing; public-data contest)", "Referer": LIST})
 
 
-def fetch(url, tries=3):
+def get(url, tries=3):
     for i in range(tries):
         try:
-            r = session.get(url, timeout=30)
+            r = s.get(url, timeout=30)
             if r.status_code == 200:
-                r.encoding = r.apparent_encoding or "utf-8"
+                r.encoding = "utf-8"
                 return r.text
-            if r.status_code == 404:
-                return None
         except requests.RequestException:
             pass
         time.sleep(2 * (i + 1))
     return None
 
 
-def d(s):
-    return datetime.strptime(s.replace(".", "-"), "%Y-%m-%d").date()
+def ymd(x):
+    x = re.sub(r"\D", "", str(x or ""))[:8]
+    return f"{x[:4]}-{x[4:6]}-{x[6:8]}" if len(x) == 8 else ""
 
 
-def find_venue(text):
-    for v in VENUES:
-        if v in text:
-            return v
-    return ""
+def month_list(ym):
+    """한 달 치 JSON → [{seq,title,venue,from,to,tm,poster}]"""
+    for i in range(3):
+        try:
+            r = s.post(AJAX, json={"nowYM": ym, "plcCd": ""}, timeout=30,
+                       headers={"X-Requested-With": "XMLHttpRequest", "Accept": "application/json"})
+            if r.status_code == 200:
+                data = r.json()
+                rows = data[0] if isinstance(data, list) and data and isinstance(data[0], list) else data
+                return [{"seq": int(it["evtSeq"]), "title": (it.get("title") or "").strip(),
+                         "venue": (it.get("plc") or "").strip(), "from": ymd(it.get("beginDt")),
+                         "to": ymd(it.get("endDt")), "tm": (it.get("tm") or "").strip(),
+                         "poster": f"{CTX}/attachFiles/eventInfo/{it['fileNm']}" if it.get("fileNm") else ""}
+                        for it in rows if it.get("evtSeq")]
+        except (requests.RequestException, ValueError, KeyError, TypeError):
+            pass
+        time.sleep(2 * (i + 1))
+    return None
 
 
-def parse_list(html):
-    soup = BeautifulSoup(html, "html.parser")
-    out = {}
-    for a in soup.find_all("a", href=re.compile(r"evtSeq=(\d+)")):
-        seq = int(re.search(r"evtSeq=(\d+)", a["href"]).group(1))
-        text = a.get_text(" ", strip=True)
-        p = PERIOD.search(text)
-        strong = a.find(["strong", "b", "h3", "h4", "dt"])
-        title = strong.get_text(" ", strip=True) if strong else text[: p.start()].strip() if p else text
-        em = a.find(["em", "i"])
-        venue = em.get_text(" ", strip=True) if em else find_venue(text)
-        img = a.find("img")
-        e = out.setdefault(seq, {"seq": seq})
-        if title and len(title) > len(e.get("title", "")):
-            e["title"] = title
-        if venue:
-            e["venue"] = venue
-        if p:
-            e["from"], e["to"] = d(p.group(1)).isoformat(), d(p.group(2)).isoformat()
-        if img and img.get("src") and "attachFiles" in img["src"]:
-            e["poster"] = SITE + img["src"] if img["src"].startswith("/") else img["src"]
-        e["listText"] = text[:300]
+def html_list(html):
+    """목록 HTML(a.item) → 같은 형식"""
+    out = []
+    for a in BeautifulSoup(html, "html.parser").select("a.item[href*=evtSeq]"):
+        m = re.search(r"evtSeq=(\d+)", a["href"])
+        dt = a.select_one(".date")
+        p = re.findall(r"\d{4}-\d{2}-\d{2}", dt.get_text() if dt else "")
+        img = a.select_one("img")
+        tx = lambda sel: (a.select_one(sel).get_text(" ", strip=True) if a.select_one(sel) else "")
+        out.append({"seq": int(m.group(1)), "title": tx(".title"), "venue": tx(".place"),
+                    "from": p[0] if p else "", "to": p[-1] if p else "", "tm": tx(".time"),
+                    "poster": SITE + img["src"] if img and img.get("src", "").startswith("/") else ""})
     return out
 
 
-def to24(ampm, h):
-    h = int(h)
-    if ampm == "오후" and h < 12:
-        h += 12
-    if ampm == "오전" and h == 12:
-        h = 0
-    if not ampm and 1 <= h <= 7:  # '일 2시, 6시'처럼 오전/오후 없이 쓴 저녁·오후 시각
-        h += 12
-    return h
-
-
-def parse_times(text, d0, d1):
-    """회차 시각 → ['YYYY-MM-DD HH:MM', ...]"""
-    out = set()
-    # 1) 날짜가 적힌 회차: '2026년 11월 27일(금) 오후 7시', '11월 28일 18:00', '11.27(금) 19:00'
-    pat = re.compile(r"(?:(\d{4})\s*년\s*)?(\d{1,2})\s*월\s*(\d{1,2})\s*일\s*(?:\([^)]{1,3}\))?\s*"
-                     r"(오전|오후)?\s*(\d{1,2})\s*(?:시(?:\s*(\d{1,2})\s*분)?|:(\d{2}))")
-    pat2 = re.compile(r"(?<!\d)(\d{1,2})[./](\d{1,2})\s*\([^)]{1,3}\)\s*(오전|오후)?\s*(\d{1,2}):(\d{2})")
-    for m in pat.finditer(text):
-        y = int(m.group(1)) if m.group(1) else (d0.year if int(m.group(2)) >= d0.month else d1.year)
-        h = to24(m.group(4), m.group(5)); mi = int(m.group(6) or m.group(7) or 0)
-        try:
-            day = date(y, int(m.group(2)), int(m.group(3)))
-        except ValueError:
-            continue
-        if d0 <= day <= d1 and 8 <= h <= 23:
-            out.add(f"{day} {h:02d}:{mi:02d}")
-    for m in pat2.finditer(text):
-        mo, dd = int(m.group(1)), int(m.group(2))
-        y = d0.year if mo >= d0.month else d1.year
-        try:
-            day = date(y, mo, dd)
-        except ValueError:
-            continue
-        h = to24(m.group(3), m.group(4))
-        if d0 <= day <= d1 and 8 <= h <= 23:
-            out.add(f"{day} {h:02d}:{m.group(5)}")
-    if out:
-        return sorted(out)
-    # 2) 요일로 적힌 회차: '금 19:00 / 토 18:00', '화~금 오후 8시', '평일 20시, 주말 15시'
-    wk = {}
-    grp = {"평일": range(0, 5), "주말": range(5, 7), "매일": range(0, 7)}
-    pat3 = re.compile(r"(평일|주말|매일|[월화수목금토일](?:요일)?(?:\s*[~\-]\s*[월화수목금토일](?:요일)?)?)\s*[:)]?\s*"
-                      r"((?:(?:오전|오후)?\s*\d{1,2}\s*(?::\d{2}|시(?:\s*\d{1,2}\s*분)?)\s*[,/·]?\s*)+)")
-    for m in pat3.finditer(text):
-        key = m.group(1).replace("요일", "").replace(" ", "")
-        if key in grp:
-            idx = list(grp[key])
-        elif re.match(r"[월화수목금토일][~\-][월화수목금토일]", key):
-            a, b = DOW.index(key[0]), DOW.index(key[-1])
-            idx = list(range(a, b + 1)) if a <= b else list(range(a, 7)) + list(range(0, b + 1))
-        else:
-            idx = [DOW.index(key[0])]
-        ap = None
-        for t in re.finditer(r"(오전|오후)?\s*(\d{1,2})\s*(?::(\d{2})|시(?:\s*(\d{1,2})\s*분)?)", m.group(2)):
-            ap = t.group(1) or ap
-            h = to24(ap, t.group(2))
-            if 8 <= h <= 23:
-                for i in idx:
-                    wk.setdefault(i, set()).add(f"{h:02d}:{int(t.group(3) or t.group(4) or 0):02d}")
-    day = d0
-    while day <= d1 and wk:
-        for t in sorted(wk.get(day.weekday(), [])):
-            out.add(f"{day} {t}")
-        day += timedelta(days=1)
-    return sorted(out)
-
-
-def runtime(text, default=150):
-    m = re.search(r"(?:관람\s*시간|러닝\s*타임|공연\s*시간)[\s\S]{0,20}?(?:총\s*)?(?:(\d)\s*시간\s*)?(\d{1,3})\s*분", text)
-    if m:
-        return (int(m.group(1) or 0) * 60 + int(m.group(2))) or default
-    m = re.search(r"(?:관람\s*시간|러닝\s*타임)[\s\S]{0,20}?(\d)\s*시간", text)
-    return int(m.group(1)) * 60 if m else default
-
-
-def parse_view(html, seq):
-    soup = BeautifulSoup(html, "html.parser")
-    text = soup.get_text("\n", strip=True)
-    p = PERIOD.search(text)
-    if not p:
+def view(seq):
+    """상세 페이지 → {title, period, 시간, 소요시간, poster}"""
+    h = get(VIEW.format(seq))
+    if not h:
         return None
-    d0, d1 = d(p.group(1)), d(p.group(2))
-    title = ""
-    og = soup.find("meta", property="og:title")
-    for el in soup.find_all(["h2", "h3", "h4", "strong", "p", "div", "dt"], class_=re.compile(r"tit|subject|name", re.I)):
-        t = el.get_text(" ", strip=True)
-        if 2 < len(t) < 120 and t not in ("공연/행사", "공연안내", "공연/행사 안내") and not PERIOD.search(t):
-            title = t
-            break
-    if not title:  # '기간' 바로 앞 줄
-        lines = text.split("\n")
-        for i, ln in enumerate(lines):
-            if PERIOD.search(ln) or ln.startswith("기간"):
-                title = lines[i - 1] if i else ""
-                break
-    if not title and og:
-        title = og.get("content", "")
-    poster = ""
-    for img in soup.find_all("img"):
-        src = img.get("src") or ""
-        if "attachFiles/eventInfo" in src:
-            poster = SITE + src if src.startswith("/") else src
-            break
-    # 본문 중 공연 정보 부분만(공연장 소개 문구에서 시각을 잘못 읽지 않도록 기간 이후 2,000자)
-    body = text[p.start(): p.start() + 2000]
-    return {"seq": seq, "title": title, "from": d0.isoformat(), "to": d1.isoformat(), "poster": poster,
-            "sessions": parse_times(body, d0, d1), "runtime": runtime(body), "venueGuess": find_venue(body[:600]),
-            "url": VIEW.format(seq)}
+    soup = BeautifulSoup(h, "html.parser")
+    box = soup.select_one(".concert_view") or soup
+    info = {}
+    for li in box.select(".detail_info li"):
+        k, v = li.find("em"), li.find("span")
+        if k and v:
+            info[k.get_text(strip=True)] = v.get_text(" ", strip=True)
+    t = box.select_one(".title_info .title")
+    img = box.select_one(".poster img")
+    place = soup.select_one(".basic_tab li.place .sub_tabs a")
+    if not info.get("기간"):
+        return None
+    p = re.findall(r"\d{4}-\d{2}-\d{2}", info["기간"])
+    return {"title": t.get_text(" ", strip=True) if t else "", "from": p[0], "to": p[-1],
+            "tmDetail": info.get("시간", ""), "runtime": runtime(info.get("소요시간", "")),
+            "venueDetail": place.get_text(strip=True) if place else "",
+            "poster": SITE + img["src"] if img and img.get("src", "").startswith("/") else ""}
+
+
+def runtime(x, default=150):
+    h = re.search(r"(\d+)\s*시간", x or "")
+    m = re.search(r"(\d+)\s*분", x or "")
+    t = (int(h.group(1)) * 60 if h else 0) + (int(m.group(1)) if m else 0)
+    return t if 30 <= t <= 600 else default
+
+
+# ---- 공연 시간 안내 문구 → 회차 ----
+TIME = re.compile(r"(오전|오후|AM|PM|am|pm)?\s*(\d{1,2})\s*(?::\s*(\d{2})|시(?:\s*(\d{1,2})\s*분|\s*반)?|\s*(AM|PM|am|pm))")
+DATE = re.compile(r"(?:(\d{4})\s*년\s*)?(?:(\d{1,2})\s*월\s*)?(\d{1,2})\s*일(?!\s*(?:요일|자))|(?<!\d)(\d{1,2})[./](\d{1,2})(?!\d)")
+
+
+def times_in(seg, with_pos=False):
+    out, ap = [], None
+    for m in TIME.finditer(seg):
+        a = (m.group(1) or m.group(5) or "").upper()
+        if a in ("오전", "AM"):
+            ap = "AM"
+        elif a in ("오후", "PM"):
+            ap = "PM"
+        h = int(m.group(2))
+        mi = int(m.group(3) or m.group(4) or (30 if "반" in m.group(0) else 0))
+        if ap == "PM" and h < 12:
+            h += 12
+        elif ap == "AM" and h == 12:
+            h = 0
+        elif not ap and 1 <= h <= 7:  # '일 2시, 6시'처럼 오전/오후를 생략한 낮·저녁 시각
+            h += 12
+        if 8 <= h <= 23 and mi < 60:
+            out.append((m.start(), f"{h:02d}:{mi:02d}"))
+    return out if with_pos else [t for _, t in out]
+
+
+def dates_in(seg, d0, d1):
+    """'2026년 11월 27일(금)', '6월 27일(토) - 28일(일)', '2026.11.21' → [(위치, date 또는 None(기간 밖), 범위표시)]"""
+    out, mo, yr = [], None, None
+    for m in DATE.finditer(seg):
+        if m.group(4):
+            mo, dd = int(m.group(4)), int(m.group(5))
+            if not (1 <= mo <= 12):
+                continue
+        else:
+            yr = int(m.group(1)) if m.group(1) else yr
+            mo = int(m.group(2)) if m.group(2) else mo
+            dd = int(m.group(3))
+        if not mo:
+            continue
+        y = yr or (d0.year if (mo, dd) >= (d0.month, d0.day) else d1.year)
+        try:
+            dt = date(y, mo, dd)
+        except ValueError:
+            continue
+        rng = bool(out) and bool(re.search(r"[-~∼]\s*$", seg[max(0, m.start() - 4):m.start()]))
+        out.append((m.start(), dt if d0 <= dt <= d1 else None, rng))
+    return out
+
+
+def days_in(seg):
+    seg = re.sub(r"\([^)]*\)", "", seg)
+    if "매일" in seg or "전일" in seg:
+        return set(range(7))
+    out = set()
+    if "평일" in seg:
+        out |= set(range(5))
+    if "주말" in seg or "토·일" in seg:
+        out |= {5, 6}
+    m = re.search(r"([월화수목금토일])(?:요일)?\s*[~\-∼]\s*([월화수목금토일])(?:요일)?", seg)
+    if m:
+        a, b = DOW.index(m.group(1)), DOW.index(m.group(2))
+        out |= set(range(a, b + 1)) if a <= b else set(range(a, 7)) | set(range(0, b + 1))
+    head = re.split(r"\d|오전|오후", seg, 1)[0]  # 시각 앞의 요일 글자만 ('수목금 19시', '토 15시')
+    for c in re.findall(r"[월화수목금토일]", re.sub(r"[월화수목금토일]요일", lambda x: x.group(0)[0], head)):
+        out.add(DOW.index(c))
+    return out
+
+
+def sessions(text, d0, d1):
+    out = set()
+    for seg in re.split(r"\s*(?:/|\||\n|;|,(?=\s*[월화수목금토일평주매]))\s*", text or ""):
+        tp = times_in(seg, with_pos=True)
+        if not tp:
+            continue
+        ts = [t for _, t in tp]
+        ds = dates_in(seg, d0, d1)
+        valid = [x for _, x, _ in ds if x]
+        if valid:
+            if any(r for _, _, r in ds):  # 'A일 - B일' 범위: 그 사이 모든 날 × 시각
+                a, b = min(valid), max(valid)
+                days = [a + timedelta(days=i) for i in range((b - a).days + 1)]
+                out |= {f"{x} {t}" for x in days for t in ts}
+            elif tp[0][0] < ds[0][0]:  # 시각이 날짜보다 먼저 나오면 모든 날 × 시각
+                out |= {f"{x} {t}" for x in valid for t in ts}
+            else:  # 각 시각을 바로 앞에 적힌 날짜와 짝짓기
+                for pos, t in tp:
+                    prev = [x for p_, x, _ in ds if p_ < pos]
+                    if prev and prev[-1]:
+                        out.add(f"{prev[-1]} {t}")
+            continue
+        if ds:  # 날짜가 있지만 모두 기간 밖(오타 등)
+            continue
+        wk = days_in(seg)
+        if wk:
+            x = d0
+            while x <= d1:
+                if x.weekday() in wk:
+                    out |= {f"{x} {t}" for t in ts}
+                x += timedelta(days=1)
+        elif d0 == d1 or (d1 - d0).days <= 3:  # 요일·날짜 없이 시각만: 짧은 공연이면 매일 그 시각
+            x = d0
+            while x <= d1:
+                out |= {f"{x} {t}" for t in ts}
+                x += timedelta(days=1)
+    return sorted(out)
 
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--months", type=int, default=6)
     ap.add_argument("--debug", default="")
-    ap.add_argument("--scan", type=int, default=15, help="연속으로 이만큼 없으면 번호 탐색을 멈춤")
-    ap.add_argument("--back", type=int, default=0, help="처음 실행 때 가장 큰 번호에서 이만큼 거슬러 올라가 탐색")
     a = ap.parse_args()
-    state = json.load(open(STATE, encoding="utf-8")) if os.path.exists(STATE) else {"events": {}}
-    ev = {int(k): v for k, v in state["events"].items()}
     today = datetime.now(KST).date()
+    state = json.load(open(STATE, encoding="utf-8")) if os.path.exists(STATE) else {"events": {}}
+    ev = {int(k): v for k, v in state.get("events", {}).items() if v.get("title") and v.get("title") != "사이트맵"}
 
-    html = fetch(LIST)
-    if not html:
-        raise SystemExit("목록 페이지를 받지 못했습니다.")
+    found, ok_months = {}, 0
+    list_html = get(LIST)  # 쿠키를 받고, JSON이 막히면 이 HTML을 쓴다
+    if a.debug and list_html:
+        os.makedirs(a.debug, exist_ok=True)
+        open(os.path.join(a.debug, "list.html"), "w", encoding="utf-8").write(list_html)
+    y, m = today.year, today.month
+    for _ in range(a.months):
+        ym = f"{y}{m:02d}"
+        rows = month_list(ym)
+        if rows is not None:
+            ok_months += 1
+            for r in rows:
+                found[r["seq"]] = r
+            print(f"{ym}: {len(rows)}건")
+        else:
+            print(f"{ym}: JSON 실패")
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+        time.sleep(0.5)
+    if not ok_months and list_html:  # JSON이 막히면 목록 HTML(이번 달)
+        for r in html_list(list_html):
+            found[r["seq"]] = r
+        print(f"목록 HTML에서 {len(found)}건")
     if a.debug:
         os.makedirs(a.debug, exist_ok=True)
-        open(os.path.join(a.debug, "list.html"), "w", encoding="utf-8").write(html)
-    listed = parse_list(html)
-    print(f"목록에서 {len(listed)}건: {sorted(listed)}")
-    for seq, e in listed.items():
-        ev.setdefault(seq, {}).update(e)
+        json.dump(list(found.values()), open(os.path.join(a.debug, "months.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
 
-    # 상세를 읽을 번호: 목록에 뜬 것 + 기존에 알던 것 중 아직 안 끝난 것(7일마다) + 새 번호 탐색
-    todo = set(listed)
-    for seq, e in ev.items():
-        if e.get("to", "9999") >= today.isoformat() and e.get("checked", "") <= (today - timedelta(days=7)).isoformat():
-            todo.add(seq)
-    top = max(ev) if ev else 0
-    start = top - a.back if a.back else top
-    misses, seq, first = 0, start, True
-    while misses < a.scan:
-        seq += 1
-        if seq in ev and seq not in todo:
+    for seq, r in found.items():
+        e = ev.setdefault(seq, {"seq": seq})
+        e.update({k: v for k, v in r.items() if v})
+        e["url"] = VIEW.format(seq)
+    # 상세: 아직 안 끝난 공연만, 7일에 한 번
+    for seq, e in sorted(ev.items()):
+        if e.get("to", "") < today.isoformat() or e.get("checked", "") > (today - timedelta(days=7)).isoformat():
             continue
-        h = fetch(VIEW.format(seq))
-        info = parse_view(h, seq) if h else None
-        if a.debug and first and info:
-            open(os.path.join(a.debug, f"view_{seq}.html"), "w", encoding="utf-8").write(h)
-            first = False
-        if info:
-            misses = 0
-            ev.setdefault(seq, {}).update({k: v for k, v in info.items() if v not in ("", None)})
-            ev[seq]["checked"] = today.isoformat()
-            todo.discard(seq)
-        elif seq > top:  # 이미 아는 범위 안의 빈 번호(삭제된 글)는 멈춤 조건에 넣지 않는다
-            misses += 1
+        v = view(seq)
+        if v:
+            for k in ("tmDetail", "runtime", "venueDetail"):
+                e[k] = v[k]
+            for k in ("title", "from", "to", "poster"):
+                if v[k] and not e.get(k):
+                    e[k] = v[k]
+        e["checked"] = today.isoformat()
         time.sleep(0.7)
-    for seq in sorted(todo):
-        h = fetch(VIEW.format(seq))
-        info = parse_view(h, seq) if h else None
-        if info:
-            if a.debug and first:
-                open(os.path.join(a.debug, f"view_{seq}.html"), "w", encoding="utf-8").write(h)
-                first = False
-            ev[seq].update({k: v for k, v in info.items() if v not in ("", None) and not (k == "title" and ev[seq].get("title"))})
-            ev[seq]["checked"] = today.isoformat()
-        time.sleep(0.7)
+    for e in ev.values():
+        d0, d1 = date.fromisoformat(e["from"]), date.fromisoformat(e["to"])
+        e["sessions"] = sessions(e.get("tmDetail", ""), d0, d1) or sessions(e.get("tm", ""), d0, d1)
+        e.setdefault("venue", e.get("venueDetail", ""))
+        if not e.get("venue"):
+            e["venue"] = e.get("venueDetail", "")
 
-    for e in ev.values():  # 장소: 목록의 장소 > 상세 본문에서 찾은 장소
-        e.setdefault("venue", e.get("venueGuess", ""))
-    # 끝난 지 1년 넘은 공연은 정리
     keep = {k: v for k, v in ev.items() if v.get("to", "9999") >= (today - timedelta(days=365)).isoformat()}
     os.makedirs(os.path.dirname(STATE), exist_ok=True)
     json.dump({"updated": datetime.now(KST).isoformat(timespec="minutes"), "source": LIST,
                "events": {str(k): v for k, v in sorted(keep.items())}},
               open(STATE, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
     up = [v for v in keep.values() if v.get("to", "") >= today.isoformat()]
-    print(f"저장 {len(keep)}건 (다가오는 공연 {len(up)}건, 회차 시각을 못 읽은 공연 {sum(1 for v in up if not v.get('sessions'))}건)")
+    print(f"저장 {len(keep)}건 · 다가오는 공연 {len(up)}건 · 회차 시각을 못 읽은 공연 {sum(1 for v in up if not v['sessions'])}건")
+    for v in sorted(up, key=lambda v: v["from"])[:40]:
+        print(f"  {v['from']}~{v['to']} | {v.get('venue','')} | {v['title'][:30]} | {v['sessions'][:3]}{'…' if len(v['sessions'])>3 else ''}")
 
 
 if __name__ == "__main__":
