@@ -117,20 +117,22 @@ def runtime(x, default=150):
 
 
 # ---- 공연 시간 안내 문구 → 회차 ----
-TIME = re.compile(r"(오전|오후|AM|PM|am|pm)?\s*(\d{1,2})\s*(?::\s*(\d{2})|시(?:\s*(\d{1,2})\s*분|\s*반)?|\s*(AM|PM|am|pm))")
-DATE = re.compile(r"(?:(\d{4})\s*년\s*)?(?:(\d{1,2})\s*월\s*)?(\d{1,2})\s*일(?!\s*(?:요일|자))|(?<!\d)(\d{1,2})[./](\d{1,2})(?!\d)")
+TIME = re.compile(r"(오전|오후|AM|PM|am|pm)?\s*(\d{1,2})\s*(?::\s*(\d{2})(?::\d{2})?\s*(AM|PM|am|pm)?|시(?:\s*(\d{1,2})\s*분|\s*반)?|\s*(AM|PM|am|pm)|(?<=[오후전]\s\d)$|(?<=[오후전]\d)$|(?<=[오후전]\s\d\d)$)")
+DATE = re.compile(r"(?:(\d{4})\s*년\s*)?(?:(\d{1,2})\s*월\s*)?(\d{1,2})\s*(?:일(?!\s*(?:요일|자))|(?=\())|(?<!\d)(\d{1,2})[./](\d{1,2})(?!\d)")
 
 
 def times_in(seg, with_pos=False):
     out, ap = [], None
     for m in TIME.finditer(seg):
-        a = (m.group(1) or m.group(5) or "").upper()
+        if not m.group(1) and m.group(0).strip().isdigit():
+            continue
+        a = (m.group(4) or m.group(6) or m.group(1) or "").upper()
         if a in ("오전", "AM"):
             ap = "AM"
         elif a in ("오후", "PM"):
             ap = "PM"
         h = int(m.group(2))
-        mi = int(m.group(3) or m.group(4) or (30 if "반" in m.group(0) else 0))
+        mi = int(m.group(3) or m.group(5) or (30 if "반" in m.group(0) else 0))
         if ap == "PM" and h < 12:
             h += 12
         elif ap == "AM" and h == 12:
@@ -162,7 +164,7 @@ def dates_in(seg, d0, d1):
         except ValueError:
             continue
         rng = bool(out) and bool(re.search(r"[-~∼]\s*$", seg[max(0, m.start() - 4):m.start()]))
-        out.append((m.start(), dt if d0 <= dt <= d1 else None, rng))
+        out.append((m.start(), dt if d0 <= dt <= d1 else None, rng, m.end()))
     return out
 
 
@@ -186,41 +188,47 @@ def days_in(seg):
 
 
 def sessions(text, d0, d1):
-    out = set()
-    for seg in re.split(r"\s*(?:/|\||\n|;|,(?=\s*[월화수목금토일평주매]))\s*", text or ""):
+    weekly, explicit = set(), {}
+    for seg in re.split(r"\s*(?:/|\||\n|;)\s*", text or ""):
         tp = times_in(seg, with_pos=True)
         if not tp:
             continue
         ts = [t for _, t in tp]
         ds = dates_in(seg, d0, d1)
-        valid = [x for _, x, _ in ds if x]
+        valid = [x for _, x, _, _ in ds if x]
+        rest = seg[ds[-1][3]:] if ds else ""
+        if valid and any(r for _, _, r, _ in ds) and days_in(rest):
+            seg = rest  # '2/20(토) ~ 2/21(일) 토 18시' → 기간 표시 뒤의 요일별 시각으로 처리
+            ds, valid = [], []
         if valid:
-            if any(r for _, _, r in ds):  # 'A일 - B일' 범위: 그 사이 모든 날 × 시각
+            if any(r for _, _, r, _ in ds):  # 'A일 - B일' 범위: 그 사이 모든 날 × 시각
                 a, b = min(valid), max(valid)
                 days = [a + timedelta(days=i) for i in range((b - a).days + 1)]
-                out |= {f"{x} {t}" for x in days for t in ts}
+                pairs = {(x, t) for x in days for t in ts}
             elif tp[0][0] < ds[0][0]:  # 시각이 날짜보다 먼저 나오면 모든 날 × 시각
-                out |= {f"{x} {t}" for x in valid for t in ts}
+                pairs = {(x, t) for x in valid for t in ts}
             else:  # 각 시각을 바로 앞에 적힌 날짜와 짝짓기
+                pairs = set()
                 for pos, t in tp:
-                    prev = [x for p_, x, _ in ds if p_ < pos]
+                    prev = [x for p_, x, _, _ in ds if p_ < pos]
                     if prev and prev[-1]:
-                        out.add(f"{prev[-1]} {t}")
+                        pairs.add((prev[-1], t))
+            for x, t in pairs:
+                explicit.setdefault(x, set()).add(t)
             continue
         if ds:  # 날짜가 있지만 모두 기간 밖(오타 등)
             continue
         wk = days_in(seg)
-        if wk:
-            x = d0
-            while x <= d1:
-                if x.weekday() in wk:
-                    out |= {f"{x} {t}" for t in ts}
-                x += timedelta(days=1)
-        elif d0 == d1 or (d1 - d0).days <= 3:  # 요일·날짜 없이 시각만: 짧은 공연이면 매일 그 시각
-            x = d0
-            while x <= d1:
-                out |= {f"{x} {t}" for t in ts}
-                x += timedelta(days=1)
+        if not wk and (d1 - d0).days <= 3:  # 요일·날짜 없이 시각만: 짧은 공연이면 매일 그 시각
+            wk = set(range(7))
+        x = d0
+        while x <= d1 and wk:
+            if x.weekday() in wk:
+                weekly |= {(x, t) for t in ts}
+            x += timedelta(days=1)
+    # 날짜를 콕 집어 적은 회차가 있으면 그날은 요일 규칙보다 우선
+    out = {f"{x} {t}" for x, t in weekly if x not in explicit}
+    out |= {f"{x} {t}" for x, ts_ in explicit.items() for t in ts_}
     return sorted(out)
 
 

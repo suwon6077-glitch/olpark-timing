@@ -205,7 +205,8 @@ def from_ksponco(path, start, days):
                           "start": st.strftime("%H:%M"), "end": (st + timedelta(minutes=run)).strftime("%H:%M"),
                           "endHour": math.ceil((st.hour * 60 + st.minute + run) / 60), "seats": cap_of(venue),
                           "src": "올림픽공원 홈페이지", "poster": e.get("poster", ""), "url": e.get("url", ""),
-                          "timeKnown": known})
+                          "timeKnown": known,
+                          "longRun": e.get("from", "") and (datetime.strptime(e["to"], "%Y-%m-%d") - datetime.strptime(e["from"], "%Y-%m-%d")).days > 14})
     return items
 
 
@@ -238,6 +239,7 @@ def merge(path, new):
             "est": True, "src": x["src"],
             **{k: x[k] for k in ("poster", "url") if x.get(k)},
             **({"timeKnown": False} if x.get("timeKnown") is False else {}),
+            **({"longRun": True} if x.get("longRun") else {}),
         })
     old.sort(key=lambda x: (x["date"], x["from"], x["title"]))
     S["items"] = old
@@ -262,5 +264,5 @@ if __name__ == "__main__":
     if key:
         items += from_kopis(key, today, a.days)
     else:
-        print("KOPIS_KEY 없음: 직접 입력 일정만 넣습니다.")
+        print("KOPIS_KEY 없음: KOPIS는 건너뜁니다(홈페이지·직접 입력 일정만 사용).")
     merge(a.schedule, items)
