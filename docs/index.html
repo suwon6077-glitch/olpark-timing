@@ -42,6 +42,7 @@ label{font-size:13px;color:var(--sub);display:block;margin-bottom:2px}
 .res b{font-size:16px}.res .t{font-size:20px;font-weight:700;text-align:right;white-space:nowrap}
 .res small{color:var(--sub);grid-column:1/-1}
 .waits{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+.cong{margin-top:10px}.cong h3{font-size:13px;margin:0 0 6px}.cong table{width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed}.cong th,.cong td{padding:4px 2px;text-align:center;border:1px solid var(--line)}.cong th{font-weight:600;color:var(--sub);background:#faf9f6}.cong td b{display:block;font-size:12px}.cong td small{color:#444}.cong .c0{background:#e8f1fc}.cong .c1{background:#e3f5ec}.cong .c2{background:#fde3d8}.cong .now{outline:2px solid var(--acc);outline-offset:-2px}
 .note{font-size:12px;color:var(--sub);margin:6px 0 0}
 details{margin-top:10px}summary{cursor:pointer;font-size:13px;color:var(--sub)}
 textarea{width:100%;height:70px;font-size:12px;border:1px solid var(--line);border-radius:9px;padding:6px}
@@ -99,7 +100,8 @@ textarea{width:100%;height:70px;font-size:12px;border:1px solid var(--line);bord
       <div><label for="scn">상황</label><select id="scn"></select></div>
     </div>
     <div class="waits" id="waits"></div>
-    <p class="note">출구 대기 시간은 2025년 1~7월 입출차 기록으로 추정한 값(관람객 1만 5천 명 이상 공연 기준)이며 직접 고칠 수 있습니다.</p>
+    <div class="cong" id="cong" hidden></div>
+    <p class="note" id="waitNote">출구 대기 시간은 2025년 1~7월 입출차 기록으로 추정한 값(관람객 1만 5천 명 이상 공연 기준)이며 직접 고칠 수 있습니다. 다가오는 공연을 고르면 랜덤포레스트 예측으로 바뀝니다.</p>
     <div class="hint" id="hint">주차장을 골라 주세요.</div>
     <ul class="res" id="res"></ul>
     <div class="row">
@@ -377,7 +379,32 @@ $('lotSel').onchange=e=>pickLot(e.target.value===''?-1:+e.target.value);
 $('scn').innerHTML=Object.keys(SCN).map(k=>`<option ${k==='공연 종료 직후'?'selected':''}>${k}</option>`).join('');
 function renderWaits(){ $('waits').innerHTML=Object.keys(gates).map(g=>`<div><label for="w-${g}">${g} 대기(분)</label><input type="number" min="0" max="60" id="w-${g}" value="${waits[g]??1}"></div>`).join('');
   for(const g of Object.keys(gates)) $('w-'+g).oninput=e=>{ waits[g]=Math.max(0,+e.target.value||0); solve(); }; }
-$('scn').onchange=e=>{ waits=JSON.parse(JSON.stringify(SCN[e.target.value])); renderWaits(); solve(); };
+// ---------- 랜덤포레스트 혼잡 예측 (congestion.json, GitHub Actions가 매일 새벽 다시 계산) ----------
+let CONG = null, curEv = null;
+const OFF = {'공연 종료 직후':0, '공연 종료 30분 후':30, '공연 종료 60분 후':60};
+const hm = m => `${String(Math.floor(m/60)).padStart(2,'0')}:${String(m%60).padStart(2,'0')}`;
+function endMin(x){ if(x.est && /^\d{2}:\d{2}$/.test(x.end||'')){ let m=+x.end.slice(0,2)*60+ +x.end.slice(3); const st=x.start?+x.start.slice(0,2)*60+ +x.start.slice(3):0; if(m<st) m+=1440; return m; } return (+x.to||21)*60; }
+const predDay = x => CONG && CONG.days ? CONG.days[x.date] || null : null;
+const winOf = m => hm(Math.min(23*60+30, Math.max(17*60, Math.floor(m/30)*30)));
+function predWaits(day, m){ const t=winOf(m), w={}; for(const g of Object.keys(gates)){ const c=(day.gates[g]||[]).find(v=>v.t===t); w[g]=c?Math.max(1,Math.round(c.wait)):1; } return w; }
+function renderCong(day, end, off){
+  const box=$('cong'); if(!day){ box.hidden=true; return; }
+  const first=Math.min(23*60+30-120, Math.max(17*60, Math.floor((end-30)/30)*30)), cols=[0,30,60,90,120].map(k=>hm(first+k)), now=winOf(end+off);
+  const cv=CONG.model&&CONG.model.cv?CONG.model.cv:null;
+  box.innerHTML=`<h3>출구별 혼잡 예측 · 랜덤포레스트</h3><table><tr><th>출구</th>${cols.map(t=>`<th>${t}</th>`).join('')}</tr>`
+    +Object.keys(gates).map(g=>`<tr><th>${esc(g)}</th>${cols.map(t=>{ const c=(day.gates[g]||[]).find(v=>v.t===t); if(!c) return '<td>-</td>';
+      const k=['원활','보통','혼잡'].indexOf(c.cls); return `<td class="c${k}${t===now?' now':''}" title="원활 ${Math.round(c.p[0]*100)}% · 보통 ${Math.round(c.p[1]*100)}% · 혼잡 ${Math.round(c.p[2]*100)}%"><b>${c.cls}</b><small>약 ${Math.max(1,Math.round(c.wait))}분</small></td>`; }).join('')}</tr>`).join('')
+    +`</table><p class="note" style="margin:6px 0 0">30분 구간마다 출구가 원활·보통·혼잡 중 어느 상태일지 공연 전에 알 수 있는 정보(시각, 공연 시작·종료 시각, 예상 관람객, 요일·공휴일)로 분류했습니다. 2025년 1~7월 입출차 8,904구간으로 학습했고${cv?`, 시간 순 검증 매크로 F1 ${cv['매크로F1']['시간 순(1~5월→6~7월)']}(단순 기준 ${cv['단순 기준 매크로F1(시간 순)']})`:''}입니다. 테두리 칸이 지금 상황이며, 칸을 길게 누르면 등급별 확률이 보입니다.</p>`;
+  box.hidden=false;
+}
+function applyScn(k){
+  const day=curEv?predDay(curEv):null;
+  if(day && k in OFF){ const e=endMin(curEv); waits=predWaits(day, e+OFF[k]); renderCong(day, e, OFF[k]); }
+  else { waits=JSON.parse(JSON.stringify(SCN[k])); if(k==='평상시' || !day){ curEv=null; $('eventNote').hidden=true; $('cong').hidden=true; } }
+  renderWaits(); solve();
+}
+$('scn').onchange=e=>applyScn(e.target.value);
+fetch('congestion.json',{cache:'no-store'}).then(r=>r.ok?r.json():null).then(d=>{ if(d&&d.days){ CONG=d; if(curEv) applyScn($('scn').value); } }).catch(()=>{});
 $('navBtn').onclick=startNav; $('stopBtn').onclick=stopNav;
 $('bSat').onclick=()=>setBase('sat'); $('bMap').onclick=()=>setBase('map');
 $('tiltBtn').onclick=()=>{ pitched=!pitched; map.easeTo({pitch:pitched?55:0,bearing:pitched?-15:0}); };
@@ -414,17 +441,19 @@ function renderSched(){
   for(const b of $('schList').querySelectorAll('.sch-item')) b.onclick=()=>pickEvent(items[+b.dataset.i]);
 }
 function pickEvent(x){
-  $('scn').value='공연 종료 직후'; waits=waitFor(x.audience); renderWaits();
+  curEv=x; const day=predDay(x);
+  $('scn').value='공연 종료 직후';
+  if(day){ waits=predWaits(day, endMin(x)); renderCong(day, endMin(x), 0); } else { waits=waitFor(x.audience); $('cong').hidden=true; }
+  renderWaits();
   $('eventNote').hidden=false;
   const same=(SCHED.items||[]).filter(y=>y.date===x.date);
   const pre=x.est?'예상 ':''; const audTxt=same.length>1&&same.every(y=>y.audience===x.audience)?`그날 공연 ${same.length}건 ${pre}관람객 합계 약 ${Number(x.audience).toLocaleString()}명`:`${pre}관람객 약 ${Number(x.audience).toLocaleString()}명`;
-  $('eventNote').textContent=`${x.date.slice(5).replace('-','/')}(${x.dow}) ${x.title} · ${x.est&&x.end?x.end+' 무렵':(x.to>=24?'자정':x.to+'시')} 공연 종료 직후 기준입니다. ${audTxt}${x.est?' (공연장 규모 기준 추정)':`, 그날 최대 주차 ${x.peakCars?x.peakCars.toLocaleString()+'대':'정보 없음'}`}. 출구 대기는 이 관람객 규모에 맞춰 넣었습니다.`;
+  $('eventNote').textContent=`${x.date.slice(5).replace('-','/')}(${x.dow}) ${x.title} · ${x.est&&x.end?x.end+' 무렵':(x.to>=24?'자정':x.to+'시')} 공연 종료 직후 기준입니다. ${audTxt}${x.est?' (공연장 규모 기준 추정)':`, 그날 최대 주차 ${x.peakCars?x.peakCars.toLocaleString()+'대':'정보 없음'}`}. ${day?'출구 대기는 랜덤포레스트 혼잡 예측으로 넣었습니다.':'출구 대기는 이 관람객 규모에 맞춰 넣었습니다.'}`;
   if(x.url){ const a=document.createElement('a'); a.href=x.url; a.target='_blank'; a.rel='noopener'; a.textContent=' 공식 안내 보기'; $('eventNote').appendChild(a); }
   setTab('route'); if(lot) solve(); else toast('주차한 주차장을 골라 주세요');
 }
 $('schMonth').onchange=renderSched; $('schQ').oninput=renderSched;
 fetch('schedule.json',{cache:'no-store'}).then(r=>r.ok?r.json():null).then(d=>{ if(d&&Array.isArray(d.items)){ SCHED=d; renderSched(); } }).catch(()=>{});
-$('scn').addEventListener('change',()=>{ $('eventNote').hidden=true; });
 renderSched();
 renderWaits(); gateText();
 }
