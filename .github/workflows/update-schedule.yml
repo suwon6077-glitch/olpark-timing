@@ -13,6 +13,7 @@ on:
       - data/upcoming_manual.csv
       - predict_congestion.py
       - analysis/rf_train.csv
+      - .github/workflows/update-schedule.yml
 
 permissions:
   contents: write
@@ -61,8 +62,19 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
-          git add docs/schedule.json
-          git add docs/congestion.json 2>/dev/null || true
-          git add data/ksponco_events.json 2>/dev/null || true
-          git commit -m "공연 일정 갱신 $(TZ=Asia/Seoul date +'%F')" || exit 0
-          for i in 1 2 3; do git pull --rebase && git push && break; sleep 5; done
+          # 만든 파일을 따로 두고 최신 main 위에 다시 얹는다 (다른 작업이 같은 파일을 바꿔도 충돌 없음)
+          mkdir -p /tmp/out
+          cp docs/schedule.json /tmp/out/
+          [ -f docs/congestion.json ] && cp docs/congestion.json /tmp/out/ || true
+          [ -f data/ksponco_events.json ] && cp data/ksponco_events.json /tmp/out/ || true
+          for i in 1 2 3 4 5; do
+            git fetch -q origin main && git reset -q --hard origin/main
+            cp /tmp/out/schedule.json docs/
+            [ -f /tmp/out/congestion.json ] && cp /tmp/out/congestion.json docs/ || true
+            [ -f /tmp/out/ksponco_events.json ] && cp /tmp/out/ksponco_events.json data/ || true
+            git add docs/schedule.json
+            git add docs/congestion.json data/ksponco_events.json 2>/dev/null || true
+            git commit -q -m "공연 일정 갱신 $(TZ=Asia/Seoul date +'%F')" || exit 0
+            git push -q origin HEAD:main && break
+            sleep 5
+          done
